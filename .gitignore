@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+build/
+dist/
+# Jamais de clés ni d'état de bot dans le dépôt
+.env
+config.py
+*_state.json
+*_state.json.bak
+# Données réelles (Binance, etc.) : jamais dans le dépôt, voir README
+data/real/
