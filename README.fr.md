@@ -142,7 +142,7 @@ Relevés en portant la logique (le code d'origine n'est pas inclus dans ce dép�
 - **Indicateurs sur tout l'historique.** Le bot réel les calcule sur 100 bougies : écart moyen de 0,4 point de RSI mais jusqu'à 5 points au pire sur l'ETH réel (`tests/test_indicators.py`).
 - **Exécution à l'ouverture suivante, au prix médian ± glissement.** Pas de carnet d'ordres, pas d'ordres partiels.
 - **31 heures manquantes** dans les données réelles (0,05 %), laissées telles quelles et comptées dans le rapport de qualité. Les données fictives n'ont aucun trou.
-- **Testé sous Python 3.13 uniquement**, et CI non exécutée : le workflow (Python 3.10 et 3.12) est écrit mais n'a pas tourné.
+- **Développé sous Python 3.13.** Le workflow GitHub Actions lance les tests sous Python 3.10 et 3.12 à chaque push (au vert au moment de l'écriture).
 
 ## Structure
 

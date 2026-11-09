@@ -144,7 +144,7 @@ Noted while porting the logic (the original code is not included in this reposit
 - **Indicators computed over the full history.** The real bot computes them over 100 candles: a mean gap of 0.4 RSI points but up to 5 points at worst on real ETH (`tests/test_indicators.py`).
 - **Execution at the next open, at the mid price ± slippage.** No order book, no partial fills.
 - **31 missing hours** in the real data (0.05%), left as is and counted in the quality report. The fictitious data has no gaps.
-- **Tested on Python 3.13 only**, and CI not run: the workflow (Python 3.10 and 3.12) is written but has not run.
+- **Developed on Python 3.13.** The GitHub Actions workflow runs the tests on Python 3.10 and 3.12 at each push (green when this was written).
 
 ## Structure
 
