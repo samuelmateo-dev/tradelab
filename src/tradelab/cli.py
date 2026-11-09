@@ -1,15 +1,16 @@
-"""Ligne de commande : ``tradelab backtest`` et ``tradelab carry``."""
+"""Ligne de commande : ``tradelab backtest``, ``tradelab carry`` et ``tradelab params``."""
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pandas as pd
 
 from . import carry as carry_mod
+from . import options
 from .backtest import run_backtest
 from .costs import CostModel
 from .data import load_csv, quality_report
@@ -50,7 +51,34 @@ def _windows(bars: pd.DataFrame, split: str, cfg: StrategyConfig, costs: CostMod
     return dev, val
 
 
+def _backtest_options(a: argparse.Namespace):
+    """Valide TOUTES les options avant de lire les données. Lève ``options.ConfigError`` au premier problème."""
+    overrides: dict = {}
+    if a.params:
+        path = Path(a.params)
+        if not path.is_file():
+            raise options.ConfigError(f"--params : fichier introuvable : {path}")
+        overrides = options.load_params(path)
+    cfg = options.build_config(options.merge_params(overrides, options.parse_set(a.set or [])))
+    analyses = options.parse_analyses(a.analyses, a.sensitivity)
+    variants = options.parse_leverage(a.leverage or "adaptive,1", cfg)
+    alpha = options.check_alpha(0.05 if a.alpha is None else a.alpha)
+    n_tests = options.check_tests_counted(a.tests_counted, len(variants))
+    if "verdict" not in analyses:
+        for given, name in ((a.leverage, "--leverage"), (a.alpha, "--alpha"), (a.tests_counted, "--tests-counted"), (a.json or None, "--json")):
+            if given is not None:
+                raise options.ConfigError(f"{name} n'a d'effet qu'avec l'analyse « verdict » : ajoute-la à --analyses (ou retire {name})")
+    if a.json and "sensitivity" in analyses:
+        raise options.ConfigError("--json ne sort que les verdicts : retire la sensibilité (--sensitivity ou --analyses sensitivity)")
+    return cfg, variants, analyses, alpha, n_tests
+
+
 def cmd_backtest(a: argparse.Namespace) -> int:
+    try:
+        cfg, variants, analyses, alpha, n_tests = _backtest_options(a)
+    except options.ConfigError as exc:
+        print(f"Erreur : {exc}", file=sys.stderr)
+        return 1
     path = Path(a.data)
     if not path.exists():
         print(f"Fichier introuvable : {path}", file=sys.stderr)
@@ -58,14 +86,11 @@ def cmd_backtest(a: argparse.Namespace) -> int:
     bars = load_csv(path)
     q = quality_report(bars, "1h")
     costs = CostModel(taker_fee=a.fee, slippage=a.slippage, rollover_per_4h=a.rollover)
-    hypotheses = [
-        ("Bot tel quel (levier adaptatif ×2/×3/×5)", StrategyConfig()),
-        ("Même stratégie sans levier (×1)", StrategyConfig(fixed_leverage=1)),
-    ]
     verdicts: list[Verdict] = []
-    for label, cfg in hypotheses:
-        dev, val = _windows(bars, a.split, cfg, costs, a.equity)
-        verdicts.append(judge(label, dev, val, bars["close"], n_hypotheses=len(hypotheses), n_boot=a.n_boot, seed=a.seed))
+    if "verdict" in analyses:
+        for variant in variants:
+            dev, val = _windows(bars, a.split, variant.config, costs, a.equity)
+            verdicts.append(judge(variant.label, dev, val, bars["close"], n_hypotheses=n_tests, alpha=alpha, n_boot=a.n_boot, seed=a.seed))
 
     if a.json:
         print(json.dumps([{**asdict(v), "demonstrated": v.demonstrated} for v in verdicts], indent=2, default=str))
@@ -79,7 +104,18 @@ def cmd_backtest(a: argparse.Namespace) -> int:
     print(f"Coûts supposés : frais {pct(a.fee, 2)}/ordre, glissement {pct(a.slippage, 3)}, rollover {pct(a.rollover, 3)}/4 h sur le montant emprunté")
     print("Hypothèses non vérifiées : rollover, liquidation à 40 % du niveau de marge (frais de liquidation 2 %)")
     print(f"Capital de départ {fr(a.equity, 0)} (nouveau compte au début de chaque fenêtre) · coupure DEV/VAL : {a.split}")
-    print(f"Graine {a.seed} · {a.n_boot} tirages · α corrigé (Bonferroni, {len(hypotheses)} hypothèses) = {fr(verdicts[0].alpha_adjusted, 3)}\n")
+    modified = options.describe_changes(cfg)
+    if modified:
+        print(f"Paramètres de la stratégie modifiés : {modified} (les autres : valeurs du bot d'origine)")
+    if "verdict" in analyses:
+        if modified:
+            print("Un verdict n'a de valeur que si ces paramètres ont été fixés AVANT de regarder la fenêtre VAL : les ajuster "
+                  "jusqu'à ce que VAL soit bon fausse la correction. Déclare tes essais avec --tests-counted.")
+        count = f"{n_tests} hypothèses" if n_tests == len(variants) else f"{n_tests} tests déclarés, dont {len(variants)} lancés ici"
+        start = "" if alpha == 0.05 else f"α de départ {fr(alpha, 3)} · "
+        print(f"Graine {a.seed} · {a.n_boot} tirages · {start}α corrigé (Bonferroni, {count}) = {fr(verdicts[0].alpha_adjusted, 3)}\n")
+    else:
+        print()
 
     for v in verdicts:
         print(f"▌ {v.hypothesis}")
@@ -96,8 +132,8 @@ def cmd_backtest(a: argparse.Namespace) -> int:
         print(f"  VERDICT : {'DÉMONTRÉ' if v.demonstrated else 'non démontré'}"
               + ("" if v.val.sufficient else f"  (moins de 24 mois de validation)") + "\n")
 
-    if a.sensitivity:
-        print("▌ Sensibilité aux coûts (période complète, sans levier, capital neuf)")
+    if "sensitivity" in analyses:
+        print("▌ Sensibilité aux coûts (période complète, sans levier, capital neuf)" + (f" — {modified}" if modified else ""))
         scenarios = [
             ("aucun coût", CostModel(0.0, 0.0, 0.0, 0.0)),
             ("frais 0,16 % + glissement", CostModel(taker_fee=0.0016, slippage=a.slippage)),
@@ -106,7 +142,7 @@ def cmd_backtest(a: argparse.Namespace) -> int:
         ]
         rows = []
         for name, c in scenarios:
-            r = run_backtest(bars, StrategyConfig(fixed_leverage=1), c, a.equity)
+            r = run_backtest(bars, replace(cfg, fixed_leverage=1), c, a.equity)
             rows.append([name, pct(r.total_return, 0), str(r.trades), fr(r.fees_paid, 1)])
         print(table(["Scénario", "Rendement", "Trades", "Frais payés"], rows))
         print()
@@ -140,6 +176,38 @@ def cmd_carry(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_params(a: argparse.Namespace) -> int:
+    print("Paramètres de la stratégie : à régler avec --set nom=valeur (répétable) ou --params fichier.json\n")
+    rows = [list(r) for r in options.defaults_table()]
+    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(["nom", "défaut", "plage"])]
+    header = ["nom", "défaut", "plage"]
+    print("  " + "   ".join(h.ljust(widths[i]) for i, h in enumerate(header)) + "   sens")
+    for name, default, span, meaning in rows:
+        print("  " + "   ".join(c.ljust(widths[i]) for i, c in enumerate([name, default, span])) + "   " + meaning)
+    thresholds = StrategyConfig().lev_thresholds
+    adaptive = ", ".join(f"×{lev} dès {fr(t, 0)} de capital" if t > 0 else f"×{lev} sinon" for t, lev in thresholds)
+    print("\nNiveaux de levier (--leverage, séparés par des virgules ; une hypothèse par niveau ; défaut : adaptive,1) :\n")
+    print(f"  adaptive   levier adaptatif du bot : {adaptive} (les seuils ne se règlent pas ici)")
+    print(f"  1 … {options.MAX_FIXED_LEVERAGE}     levier fixe")
+    print("\nAnalyses (--analyses, séparées par des virgules ; défaut : verdict) :\n")
+    print("\n".join(f"  {name:<12} {text}" for name, text in options.ANALYSES_HELP.items()))
+    print("\nFichier de paramètres (JSON) pour --params :\n")
+    print(options.EXAMPLE_TEXT.rstrip())
+    print(
+        "\nUn paramètre inconnu, une valeur hors plage ou une faute de frappe est refusé avec un message (jamais ignoré en silence). "
+        "Le levier ne se règle pas avec --set : utilise --leverage."
+    )
+    print(
+        "Reste figé : la logique de décision, la coupure DEV/VAL (--split), la validation minimale de 24 mois, le bootstrap par mois et le placebo. "
+        "Chaque hypothèse lancée compte pour la correction de Bonferroni ; --tests-counted N déclare aussi les essais faits ailleurs "
+        "(N ne peut pas être inférieur au nombre d'hypothèses lancées)."
+    )
+    print(
+        "Règle tes paramètres sur la fenêtre DEV, ou fixe-les avant de regarder VAL : sinon le verdict n'a plus de valeur."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradelab", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -153,9 +221,19 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--rollover", type=float, default=0.0002, help="Rollover par 4 h sur le montant emprunté (hypothèse, défaut 0,0002)")
     b.add_argument("--seed", type=int, default=42)
     b.add_argument("--n-boot", type=int, default=5000)
-    b.add_argument("--sensitivity", action="store_true", help="Ajoute le tableau de sensibilité aux coûts (≈ 15 s de plus)")
-    b.add_argument("--json", action="store_true")
+    b.add_argument("--sensitivity", action="store_true", help="Ajoute le tableau de sensibilité aux coûts (≈ 15 s de plus) ; raccourci de --analyses verdict,sensitivity")
+    b.add_argument("--json", action="store_true", help="Sortie JSON : les verdicts seulement")
+    b.add_argument("--analyses", default="verdict", help="Analyses à lancer, séparées par des virgules : verdict, sensitivity (défaut : verdict ; voir « tradelab params »)")
+    b.add_argument("--leverage", default=None, help="Niveaux de levier à tester, un par hypothèse : adaptive, 1 … 10 (défaut : adaptive,1)")
+    b.add_argument("--params", help="Fichier JSON de paramètres de la stratégie (voir « tradelab params »)")
+    b.add_argument("--set", action="append", metavar="NOM=VALEUR", help="Règle un paramètre de la stratégie, par exemple --set spread=0.02 (répétable ; passe après --params)")
+    b.add_argument("--alpha", type=float, default=None, help="Seuil de départ avant correction de Bonferroni (défaut 0,05)")
+    b.add_argument("--tests-counted", type=int, default=None, metavar="N",
+                   help="Nombre total de tests pour la correction de Bonferroni, si tu en as fait d'autres ailleurs (au moins le nombre d'hypothèses lancées)")
     b.set_defaults(func=cmd_backtest)
+
+    g = sub.add_parser("params", help="Affiche les paramètres réglables, leurs plages, les niveaux de levier, les analyses et le format de --params")
+    g.set_defaults(func=cmd_params)
 
     c = sub.add_parser("carry", help="Mesure ce que le financement des perpétuels a rapporté (portage)")
     c.add_argument("--funding", default=SAMPLE_FUNDING)

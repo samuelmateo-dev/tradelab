@@ -18,8 +18,9 @@ The project starts from a real case: a "grid + short + adaptive leverage" tradin
 | **Margin-account simulation**: leverage, locked margin, rollover on the borrowed amount, liquidation at the candle's worst price | `src/tradelab/account.py`, `costs.py` |
 | **Statistical rigor**: validation window with fresh capital, bootstrap by blocks of months, circular-shift placebo, Bonferroni correction | `src/tradelab/validation.py` |
 | **Data engineering**: safe reading of `.npz` (no pickle), resampling, quality report | `src/tradelab/data.py` |
+| **Configurable without touching the code**: strategy parameters (`--set`, `--params`), leverage levels to compare (`--leverage`), analyses to run (`--analyses`), honest hypothesis counting (`--tests-counted`) | `src/tradelab/options.py`, `examples/` |
 | **Operational robustness**: state written atomically, `.bak` backup, refusal to restart from scratch | `src/tradelab/state.py` |
-| **Quality**: 170 tests, including tests written from real defects of the original bot; 10 deliberate mutations, all detected | `tests/` |
+| **Quality**: 285 tests, including tests written from real defects of the original bot; deliberate mutations: 10 on the original code, 42 of 43 detected on the options code (the 43rd exposed a redundant check, since removed) | `tests/` |
 
 ## Getting started
 
@@ -27,12 +28,32 @@ Python 3.10 or newer. No keys, no account, no network access.
 
 ```bash
 pip install -e ".[dev]"
-pytest                                  # 170 tests, ~15 s
-tradelab backtest --sensitivity         # ~17 s, on FICTITIOUS data (see below)
+pytest                                  # 285 tests, ~40 s
+tradelab backtest --sensitivity         # ~15 s, on FICTITIOUS data (see below)
 tradelab carry                          # funding carry, on FICTITIOUS data
+tradelab params                         # what you can change: parameters, leverage levels, analyses
 ```
 
 By default the commands read `data/synthetic/`, which is **invented** data. Their figures therefore differ from those in the [Results](#results) section, which come from real data. When that is the case, the report prints a warning at the top (in French: "données FICTIVES").
+
+## Choosing what to test
+
+The default run reproduces the original bot (adaptive leverage, and no leverage). Without touching the code you can change the strategy's parameters, choose the leverage levels to compare, and choose the analyses to run. `tradelab params` prints everything, with default values and allowed ranges.
+
+```bash
+tradelab params                                                   # parameters, ranges, leverage levels, analyses, file format
+tradelab backtest --set spread=0.02 --set levels=8                # change parameters (decimal comma accepted: spread=0,02)
+tradelab backtest --params examples/params.example.json           # the same from a JSON file; --set wins over the file
+tradelab backtest --leverage 1,2,3                                # one hypothesis per level (adaptive = the bot's x2/x3/x5)
+tradelab backtest --analyses sensitivity --set levels=6           # only the cost-sensitivity table
+tradelab backtest --tests-counted 20                              # declare 20 tests in total for the Bonferroni correction
+```
+
+- **13 adjustable parameters**: grid levels and spacing, rebalance interval, ADX and RSI thresholds, short stop and target, minimum quantities. An unknown name, a value outside its range, a wrong type or an inconsistent pair (`rsi_cover` must stay below `rsi_short`) is refused with a message, **before** any data is read. Leverage is chosen with `--leverage`, not with the parameters.
+- **Every hypothesis launched counts for the Bonferroni correction**: three leverage levels means α/3. If you tried other configurations elsewhere, declare the total with `--tests-counted`; it can raise the count, never lower it below what this run launches.
+- **Changing parameters changes what the verdict means.** The judge assumes the strategy was frozen before looking at VAL. Adjusting parameters until VAL looks good makes the verdict meaningless, correction or not; the report repeats this whenever parameters are modified. Tune on DEV, or fix the values first.
+- **Fixed on purpose**: the decision rules (`strategy.decide`), the 24-month minimum of validation, the monthly block bootstrap and the placebo. The strategy is parametrizable, not pluggable: testing another strategy means writing another `decide()`.
+- With no option the report and the JSON are identical, character for character, to those of the previous version (compared against saved output).
 
 ## Data
 
@@ -118,6 +139,7 @@ Noted while porting the logic (the original code is not included in this reposit
 - **Unmeasured costs.** Fees 0.26% (the bot's value, close to the 0.271% observed on a real sale), slippage 0.03%, rollover 0.02% per 4 h: the latter is **an assumption** (Kraken states a variable rate set at execution, with no interval on the page consulted). The liquidation threshold at 40% margin level is also an assumption; only the 2% liquidation fee comes from the Kraken page. The sensitivity table shows the conclusion holds across the plausible range of fees, but not the exact size of the losses.
 - **A different market from the real bot.** Binance ETH/USDT data, whereas the bot trades ETH/EUR on Kraken.
 - **The bot's parameters are not blank.** They were chosen by their author before this project, perhaps while seeing these same years. The VAL window is therefore not out-of-sample proof in the strict sense: it removes DEV's optimism, not every selection bias.
+- **Parameters are not learned.** `--set` changes them but nothing here searches for good values: a search would have to be counted (`--tests-counted`) and judged on a window it has not seen.
 - **One asset, one period.** This bench does not say every grid strategy fails, only that this one is not proven on this data.
 - **Indicators computed over the full history.** The real bot computes them over 100 candles: a mean gap of 0.4 RSI points but up to 5 points at worst on real ETH (`tests/test_indicators.py`).
 - **Execution at the next open, at the mid price ± slippage.** No order book, no partial fills.
@@ -137,7 +159,9 @@ Noted while porting the logic (the original code is not included in this reposit
 | `src/tradelab/state.py` | Atomic state storage with backup |
 | `src/tradelab/data.py` | `.npz` → candles, resampling, quality |
 | `src/tradelab/synthetic.py` | Reproducible fictitious data (random walk, invented funding) |
-| `src/tradelab/cli.py` | `tradelab backtest` and `tradelab carry` |
+| `src/tradelab/options.py` | What the user can choose: strategy parameters (validated), leverage levels, analyses |
+| `src/tradelab/cli.py` | `tradelab backtest`, `tradelab carry` and `tradelab params` |
+| `examples/params.example.json` | Example of a `--params` file |
 | `data/synthetic/` | The fictitious files read by default |
 | `scripts/make_synthetic.py` | Regenerates `data/synthetic/` identically |
 | `scripts/build_sample.py` | Converts the author's `.npz` archives into real CSVs in `data/real/` (ignored by git) |
@@ -153,7 +177,8 @@ pytest
 - **Indicators** compared with hand-written Wilder implementations on eight series, and checked to be causal.
 - **Judge** checked with a positive control (a clairvoyant strategy: proven) and a negative control (noise: not proven).
 - **Fictitious data**: deterministic, no gaps, annualized volatility close to the requested one, fat tails, and repository files identical to the generator's output.
-- **Mutation**: deliberately breaking ten behaviors (inventory not decremented, execution at the close, p-value without correction, ADX badly initialized, zero fees, etc.) makes at least one test fail every time. A test that was too weak on ADX initialization was strengthened as a result.
+- **Options**: every parameter's range edges (accepted) and the values just outside (refused), malformed `--set` items, types, `--params` precedence, leverage lists, analyses, Bonferroni counting, and the guarantee that an invalid option stops the run before any data is read.
+- **Mutation**: deliberately breaking ten behaviors (inventory not decremented, execution at the close, p-value without correction, ADX badly initialized, zero fees, etc.) makes at least one test fail every time. A test that was too weak on ADX initialization was strengthened as a result. The same exercise on the options code (43 changes) found one redundant check, removed, and no weak test left.
 
 ## Design choices
 

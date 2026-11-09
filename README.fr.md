@@ -16,8 +16,9 @@ Le projet part d'un cas réel : un bot de trading « grille + short + levier ada
 | **Simulation de compte à marge** : levier, marge bloquée, rollover sur le montant emprunté, liquidation au pire prix de la bougie | `src/tradelab/account.py`, `costs.py` |
 | **Rigueur statistique** : fenêtre de validation à capital neuf, bootstrap par blocs de mois, placebo par décalage circulaire, correction de Bonferroni | `src/tradelab/validation.py` |
 | **Ingénierie de données** : lecture sécurisée de `.npz` (pas de pickle), rééchantillonnage, rapport de qualité | `src/tradelab/data.py` |
+| **Configurable sans toucher au code** : paramètres de la stratégie (`--set`, `--params`), niveaux de levier à comparer (`--leverage`), analyses à lancer (`--analyses`), décompte honnête des hypothèses (`--tests-counted`) | `src/tradelab/options.py`, `examples/` |
 | **Robustesse opérationnelle** : état écrit de façon atomique, sauvegarde `.bak`, refus de repartir à vide | `src/tradelab/state.py` |
-| **Qualité** : 170 tests, dont des tests écrits à partir de défauts réels du bot d'origine ; 10 mutations volontaires toutes détectées | `tests/` |
+| **Qualité** : 285 tests, dont des tests écrits à partir de défauts réels du bot d'origine ; mutations volontaires : 10 sur le code d'origine, 42 sur 43 détectées sur le code des options (la 43ᵉ a révélé un contrôle redondant, retiré depuis) | `tests/` |
 
 ## Démarrage
 
@@ -25,12 +26,32 @@ Python 3.10 ou plus récent. Aucune clé, aucun compte, aucun accès réseau.
 
 ```bash
 pip install -e ".[dev]"
-pytest                                  # 170 tests, ~15 s
-tradelab backtest --sensitivity         # ~17 s, sur des données FICTIVES (voir ci-dessous)
+pytest                                  # 285 tests, ~40 s
+tradelab backtest --sensitivity         # ~15 s, sur des données FICTIVES (voir ci-dessous)
 tradelab carry                          # portage du financement, sur des données FICTIVES
+tradelab params                         # ce qu'on peut changer : paramètres, niveaux de levier, analyses
 ```
 
 Par défaut, les commandes lisent `data/synthetic/`, des données **inventées**. Leurs chiffres diffèrent donc de ceux de la section [Résultats](#résultats), qui viennent de données réelles. Le rapport affiche « données FICTIVES » en tête quand c'est le cas.
+
+## Choisir ce qu'on teste
+
+Le lancement par défaut reproduit le bot d'origine (levier adaptatif, et sans levier). Sans toucher au code, tu peux changer les paramètres de la stratégie, choisir les niveaux de levier à comparer et choisir les analyses à lancer. `tradelab params` affiche tout, avec les valeurs par défaut et les plages acceptées.
+
+```bash
+tradelab params                                                   # paramètres, plages, niveaux de levier, analyses, format du fichier
+tradelab backtest --set spread=0.02 --set levels=8                # change des paramètres (virgule décimale acceptée : spread=0,02)
+tradelab backtest --params examples/params.example.json           # la même chose depuis un fichier JSON ; --set passe après le fichier
+tradelab backtest --leverage 1,2,3                                # une hypothèse par niveau (adaptive = le ×2/×3/×5 du bot)
+tradelab backtest --analyses sensitivity --set levels=6           # seulement le tableau de sensibilité aux coûts
+tradelab backtest --tests-counted 20                              # déclare 20 tests au total pour la correction de Bonferroni
+```
+
+- **13 paramètres réglables** : niveaux et écart de la grille, intervalle de reconstruction, seuils ADX et RSI, stop et objectif du short, quantités minimales. Un nom inconnu, une valeur hors plage, un mauvais type ou un couple incohérent (`rsi_cover` doit rester inférieur à `rsi_short`) est refusé avec un message, **avant** toute lecture de données. Le levier se choisit avec `--leverage`, pas avec les paramètres.
+- **Chaque hypothèse lancée compte pour la correction de Bonferroni** : trois niveaux de levier, c'est α/3. Si tu as essayé d'autres configurations ailleurs, déclare le total avec `--tests-counted` ; il peut relever le compte, jamais le descendre sous ce que ce lancement exécute.
+- **Changer les paramètres change le sens du verdict.** Le juge suppose que la stratégie a été figée avant de regarder VAL. Ajuster les paramètres jusqu'à ce que VAL soit bon rend le verdict sans valeur, correction ou pas ; le rapport le rappelle chaque fois que des paramètres sont modifiés. Règle sur DEV, ou fixe les valeurs d'abord.
+- **Figé volontairement** : les règles de décision (`strategy.decide`), la validation minimale de 24 mois, le bootstrap par blocs de mois et le placebo. La stratégie est paramétrable, pas remplaçable : tester une autre stratégie, c'est écrire un autre `decide()`.
+- Sans option, le rapport et le JSON sont identiques, caractère pour caractère, à ceux de la version précédente (comparés à des sorties enregistrées).
 
 ## Données
 
@@ -116,6 +137,7 @@ Relevés en portant la logique (le code d'origine n'est pas inclus dans ce dép�
 - **Coûts non mesurés.** Frais 0,26 % (valeur du bot, proche des 0,271 % relevés sur une vente réelle), glissement 0,03 %, rollover 0,02 % par 4 h : ce dernier est **une hypothèse** (Kraken indique un taux variable fixé à l'exécution, sans intervalle sur la page consultée). Le seuil de liquidation à 40 % du niveau de marge est lui aussi une hypothèse ; seuls les 2 % de frais de liquidation viennent de la page Kraken. Le tableau de sensibilité montre que la conclusion tient sur toute la plage plausible des frais, mais pas la valeur exacte des pertes.
 - **Autre marché que le bot réel.** Données Binance ETH/USDT, alors que le bot trade ETH/EUR sur Kraken.
 - **Les paramètres du bot ne sont pas vierges.** Ils ont été choisis par leur auteur avant ce projet, peut-être en voyant ces mêmes années. La fenêtre VAL n'est donc pas une preuve hors échantillon au sens strict : elle écarte l'optimisme de DEV, pas tout biais de sélection.
+- **Les paramètres ne sont pas appris.** `--set` les change mais rien ici ne cherche de bonnes valeurs : une recherche devrait être comptée (`--tests-counted`) et jugée sur une fenêtre qu'elle n'a pas vue.
 - **Un seul actif, une seule période.** Ce banc d'essai ne dit pas que toute stratégie de grille échoue, seulement que celle-ci n'est pas démontrée sur ces données.
 - **Indicateurs sur tout l'historique.** Le bot réel les calcule sur 100 bougies : écart moyen de 0,4 point de RSI mais jusqu'à 5 points au pire sur l'ETH réel (`tests/test_indicators.py`).
 - **Exécution à l'ouverture suivante, au prix médian ± glissement.** Pas de carnet d'ordres, pas d'ordres partiels.
@@ -135,7 +157,9 @@ Relevés en portant la logique (le code d'origine n'est pas inclus dans ce dép�
 | `src/tradelab/state.py` | Stockage d'état atomique avec sauvegarde |
 | `src/tradelab/data.py` | `.npz` → bougies, rééchantillonnage, qualité |
 | `src/tradelab/synthetic.py` | Données fictives reproductibles (marche aléatoire, financement inventé) |
-| `src/tradelab/cli.py` | `tradelab backtest` et `tradelab carry` |
+| `src/tradelab/options.py` | Ce que l'utilisateur peut choisir : paramètres de la stratégie (validés), niveaux de levier, analyses |
+| `src/tradelab/cli.py` | `tradelab backtest`, `tradelab carry` et `tradelab params` |
+| `examples/params.example.json` | Exemple de fichier pour `--params` |
 | `data/synthetic/` | Les fichiers fictifs lus par défaut |
 | `scripts/make_synthetic.py` | Régénère `data/synthetic/` à l'identique |
 | `scripts/build_sample.py` | Convertit les archives `.npz` de l'auteur en CSV réels dans `data/real/` (ignoré par git) |
@@ -151,7 +175,8 @@ pytest
 - **Indicateurs** comparés à des implémentations de Wilder écrites à la main, sur huit séries, et vérifiés causals.
 - **Juge** contrôlé par un témoin positif (stratégie clairvoyante : démontrée) et un témoin négatif (bruit : non démontré).
 - **Données fictives** : déterministes, sans trou, volatilité annualisée proche de celle demandée, queues épaisses, et fichiers du dépôt identiques à la sortie du générateur.
-- **Mutation** : casser volontairement dix comportements (inventaire non décrémenté, exécution à la clôture, p-value sans correction, ADX mal amorcé, frais nuls, etc.) fait échouer au moins un test à chaque fois. Un test trop faible sur l'amorçage de l'ADX a été renforcé à cette occasion.
+- **Options** : bornes de chaque paramètre (acceptées) et valeurs juste au-delà (refusées), éléments `--set` mal formés, types, priorité de `--set` sur `--params`, listes de leviers, analyses, décompte de Bonferroni, et la garantie qu'une option invalide arrête le lancement avant toute lecture de données.
+- **Mutation** : casser volontairement dix comportements (inventaire non décrémenté, exécution à la clôture, p-value sans correction, ADX mal amorcé, frais nuls, etc.) fait échouer au moins un test à chaque fois. Un test trop faible sur l'amorçage de l'ADX a été renforcé à cette occasion. Le même exercice sur le code des options (43 modifications) a trouvé un contrôle redondant, retiré, et aucun test faible.
 
 ## Choix de conception
 
